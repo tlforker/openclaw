@@ -30,6 +30,8 @@ export {
 import { extractTextFromChatContent } from "../../shared/chat-content.js";
 import { sanitizeUserFacingText } from "../pi-embedded-helpers.js";
 import {
+  extractFromNimSerializedContent,
+  stripDeepSeekDsmlToolCallXml,
   stripDowngradedToolCallText,
   stripMinimaxToolCallXml,
   stripThinkingTagsFromText,
@@ -142,7 +144,11 @@ export function sanitizeTextContent(text: string): string {
   if (!text) {
     return text;
   }
-  return stripThinkingTagsFromText(stripDowngradedToolCallText(stripMinimaxToolCallXml(text)));
+  return stripThinkingTagsFromText(
+    stripDowngradedToolCallText(
+      stripDeepSeekDsmlToolCallXml(stripMinimaxToolCallXml(extractFromNimSerializedContent(text))),
+    ),
+  );
 }
 
 export function extractAssistantText(message: unknown): string | undefined {

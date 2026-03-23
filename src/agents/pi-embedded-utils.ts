@@ -34,6 +34,80 @@ export function stripMinimaxToolCallXml(text: string): string {
 }
 
 /**
+ * Strip DeepSeek DSML tool call XML that leaks into text content.
+ * DeepSeek models (via NVIDIA NIM) sometimes embed tool calls using DSML
+ * format in text blocks instead of proper structured tool calls. This removes:
+ * - <｜DSML｜function_calls>...</｜DSML｜function_calls> blocks
+ * - Stray remaining DSML tags
+ * The ｜ character is U+FF5C (FULLWIDTH VERTICAL LINE).
+ */
+export function stripDeepSeekDsmlToolCallXml(text: string): string {
+  if (!text) {
+    return text;
+  }
+  // Fast-path: DSML tags always contain the U+FF5C fullwidth vertical bar
+  if (!text.includes("\uFF5CDSML\uFF5C")) {
+    return text;
+  }
+
+  // Remove complete <｜DSML｜function_calls>...</｜DSML｜function_calls> blocks.
+  let cleaned = text.replace(
+    /<\uFF5CDSML\uFF5Cfunction_calls>[\s\S]*?<\/\uFF5CDSML\uFF5Cfunction_calls>/gi,
+    "",
+  );
+
+  // Remove any remaining stray DSML open/close tags.
+  cleaned = cleaned.replace(/<\/?\uFF5CDSML\uFF5C[^>]*>/g, "");
+
+  return cleaned;
+}
+
+/**
+ * Extract actual text from NIM-serialized content blocks.
+ * NVIDIA NIM-hosted models (kimi-k2.5, deepseek-v3.2) sometimes emit their
+ * response as a Python-formatted content array rather than plain text, e.g.:
+ *   [{'type': 'text', 'text': 'actual response here'}]
+ * This detects that pattern and extracts the text values from it.
+ */
+export function extractFromNimSerializedContent(text: string): string {
+  if (!text) {
+    return text;
+  }
+  const trimmed = text.trim();
+  // Only trigger on text that looks like a Python list-of-dicts starting with [{
+  if (!trimmed.startsWith("[{")) {
+    return text;
+  }
+  // Must contain a 'type': 'text' entry (Python single-quote style)
+  if (!/['"]type['"]\s*:\s*['"]text['"]/.test(trimmed)) {
+    return text;
+  }
+
+  // Extract all 'text': 'value' pairs (handles escaped single quotes inside value)
+  const parts: string[] = [];
+  const singleQuoteRe = /'text'\s*:\s*'((?:[^'\\]|\\.)*)'/g;
+  let match: RegExpExecArray | null;
+  while ((match = singleQuoteRe.exec(trimmed)) !== null) {
+    parts.push(match[1].replace(/\\'/g, "'"));
+  }
+
+  if (parts.length === 0) {
+    // Fall back to double-quoted variant just in case
+    const doubleQuoteRe = /"text"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+    while ((match = doubleQuoteRe.exec(trimmed)) !== null) {
+      parts.push(match[1].replace(/\\"/g, '"'));
+    }
+  }
+
+  if (parts.length === 0) {
+    return text;
+  }
+
+  const extracted = parts.join("\n").trim();
+  return extracted || text;
+}
+
+/**
  * Strip downgraded tool call text representations that leak into text content.
  * When replaying history to Gemini, tool calls without `thought_signature` are
  * downgraded to text blocks like `[Tool Call: name (ID: ...)]`. These should
@@ -212,7 +286,11 @@ export function extractAssistantText(msg: AssistantMessage): string {
     extractTextFromChatContent(msg.content, {
       sanitizeText: (text) =>
         stripThinkingTagsFromText(
-          stripDowngradedToolCallText(stripMinimaxToolCallXml(text)),
+          stripDowngradedToolCallText(
+            stripDeepSeekDsmlToolCallXml(
+              stripMinimaxToolCallXml(extractFromNimSerializedContent(text)),
+            ),
+          ),
         ).trim(),
       joinWith: "\n",
       normalizeText: (text) => text.trim(),
