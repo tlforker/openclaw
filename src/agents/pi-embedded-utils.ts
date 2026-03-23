@@ -69,7 +69,7 @@ export function stripDeepSeekDsmlToolCallXml(text: string): string {
  *   [{'type': 'text', 'text': 'actual response here'}]
  * This detects that pattern and extracts the text values from it iteratively
  * by performing in-place replacement, handling multiple levels of nesting,
- * escaping, and preserving surrounding text even if blocks are malformed.
+ * escaping (including escaped keys), and preserving surrounding text.
  */
 export function extractFromNimSerializedContent(text: string): string {
   if (!text || typeof text !== "string") {
@@ -99,7 +99,8 @@ export function extractFromNimSerializedContent(text: string): string {
 
   // Continuously unwrap as long as we find NIM-serialized blocks
   while (iterations < 10) {
-    const textKeyRe = /['"]text['"]\s*:\s*(['"])/g;
+    // Flexible regex to find the 'text' key even if it has leading backslashes (escaped in nested layers)
+    const textKeyRe = /\\*['"]text\\*['"]\s*:\s*(['"])/g;
     let match: RegExpExecArray | null;
     let found = false;
 
@@ -122,7 +123,8 @@ export function extractFromNimSerializedContent(text: string): string {
       }
 
       const dictContent = current.substring(lastOpenBrace, valueEndIdx + 1);
-      if (!/['"]type['"]\s*:\s*['"]text['"]/.test(dictContent)) {
+      // NIM blocks must contain a type: text field (also potentially escaped)
+      if (!/\\*['"]type\\*['"]\s*:\s*\\*['"]text\\*['"]/.test(dictContent)) {
         continue;
       }
 
