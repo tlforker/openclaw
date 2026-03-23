@@ -68,13 +68,14 @@ export function stripDeepSeekDsmlToolCallXml(text: string): string {
  * response as a Python-formatted content array rather than plain text, e.g.:
  *   [{'type': 'text', 'text': 'actual response here'}]
  * This detects that pattern and extracts the text values from it iteratively
- * to handle multiple levels of nesting and escaping using a manual state machine.
+ * by performing in-place replacement, handling multiple levels of nesting,
+ * escaping, and preserving surrounding text even if blocks are malformed.
  */
 export function extractFromNimSerializedContent(text: string): string {
   if (!text || typeof text !== "string") {
     return text;
   }
-  let current = text.trim();
+  let current = text;
   let iterations = 0;
 
   // Function to find the end of a quoted string handling backslash escaping
@@ -96,27 +97,37 @@ export function extractFromNimSerializedContent(text: string): string {
     return -1;
   };
 
-  // Continuously unwrap as long as it looks like a serialized Python/JSON list of dicts.
-  // We handle escaped variants (e.g. \\'[{\') by ignoring leading backslashes.
-  while (current.replace(/^\\+/g, "").startsWith("[{") && iterations < 10) {
-    const parts: string[] = [];
-    const textKeyRe = /['"]text['"]\s*:\s*/g;
+  // Continuously unwrap as long as we find NIM-serialized blocks
+  while (iterations < 10) {
+    const textKeyRe = /['"]text['"]\s*:\s*(['"])/g;
     let match: RegExpExecArray | null;
+    let found = false;
+
+    // Use a temporary list of replacements to perform them all at once at the end of the pass
+    const replacements: Array<{ start: number; end: number; content: string }> = [];
 
     while ((match = textKeyRe.exec(current)) !== null) {
+      const quoteChar = match[1];
       const valueStartIdx = match.index + match[0].length;
-      const quoteChar = current[valueStartIdx];
-      if (quoteChar !== "'" && quoteChar !== '"') {
-        continue;
-      }
-
-      const valueEndIdx = findValueEnd(current, valueStartIdx + 1, quoteChar);
+      const valueEndIdx = findValueEnd(current, valueStartIdx, quoteChar);
       if (valueEndIdx === -1) {
         continue;
       }
 
-      const rawValue = current.substring(valueStartIdx + 1, valueEndIdx);
-      // Unescape one level of backslashes for common Python/JSON serialization patterns
+      // Verify this 'text' key is part of a NIM block by looking for 'type': 'text' in the containing dict
+      const beforeMatch = current.substring(0, match.index);
+      const lastOpenBrace = beforeMatch.lastIndexOf("{");
+      if (lastOpenBrace === -1) {
+        continue;
+      }
+
+      const dictContent = current.substring(lastOpenBrace, valueEndIdx + 1);
+      if (!/['"]type['"]\s*:\s*['"]text['"]/.test(dictContent)) {
+        continue;
+      }
+
+      // Extract raw value and unescape one level
+      const rawValue = current.substring(valueStartIdx, valueEndIdx);
       const unescaped = rawValue.replace(/\\(.)/g, (m, char) => {
         if (char === "\\") {
           return "\\";
@@ -138,16 +149,42 @@ export function extractFromNimSerializedContent(text: string): string {
         }
         return char;
       });
-      parts.push(unescaped);
-      // Advance regex to skip this value
-      textKeyRe.lastIndex = valueEndIdx + 1;
+
+      // Determine the boundaries of the containing block ([{...}]) to replace
+      let blockStart = lastOpenBrace;
+      const prefix = current.substring(0, blockStart);
+      if (prefix.trim().endsWith("[")) {
+        blockStart = prefix.lastIndexOf("[");
+      }
+
+      let blockEnd = valueEndIdx + 1;
+      const suffix = current.substring(blockEnd);
+      const firstCloseBrace = suffix.indexOf("}");
+      if (firstCloseBrace !== -1) {
+        blockEnd = valueEndIdx + 1 + firstCloseBrace + 1;
+        const remaining = current.substring(blockEnd);
+        if (remaining.trim().startsWith("]")) {
+          blockEnd += remaining.indexOf("]") + 1;
+        }
+      }
+
+      replacements.push({ start: blockStart, end: blockEnd, content: unescaped });
+      found = true;
+      // Advance regex to skip the rest of this block
+      textKeyRe.lastIndex = blockEnd;
     }
 
-    if (parts.length === 0) {
+    if (!found) {
       break;
     }
 
-    current = parts.join("\n").trim();
+    // Apply replacements in reverse order to keep indices valid
+    let nextCurrent = current;
+    for (let i = replacements.length - 1; i >= 0; i--) {
+      const { start, end, content: unescaped } = replacements[i];
+      nextCurrent = nextCurrent.substring(0, start) + unescaped + nextCurrent.substring(end);
+    }
+    current = nextCurrent;
     iterations++;
   }
 
